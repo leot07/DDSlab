@@ -9,8 +9,11 @@ output: html_document
 knitr::opts_chunk$set(echo = FALSE)
 
 library(kableExtra)
+library(parallel)
 
 raw.file = "../../data/qualys/latest.qkdb.xml.zip"
+
+number_of_cores <- detectCores() - 1 
 ```
 
 # Qualys KDB
@@ -20,7 +23,7 @@ Lorem ipsum dolor sit amet, consectetur adipiscing elit. Etiam vitae erat dignis
 ```{r read_raw}
 doc <- xml2::read_xml(raw.file)
 
-kdb <- data.frame(qid = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/QID")),
+df.base <- data.frame(qid = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/QID")),
                   title = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/TITLE")),
                   vuln_type = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/VULN_TYPE")),
                   category = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/CATEGORY")),
@@ -28,9 +31,8 @@ kdb <- data.frame(qid = rvest::html_text(rvest::html_elements(doc, xpath = "//VU
                   patchable = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/PATCHABLE")),
                   published = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/LAST_SERVICE_MODIFICATION_DATETIME")),
                   stringsAsFactors = FALSE)
-kdb$published <- as.POSIXct.POSIXlt(strptime(x = kdb$published, format = "%Y-%m-%dT%TZ"))
+df.base$published <- as.POSIXct.POSIXlt(strptime(x = df.base$published, format = "%Y-%m-%dT%TZ"))
 
-kable(head(kdb)) %>% kable_styling()
 ```
 
 ## Including Cybersecurity Standards
@@ -38,18 +40,77 @@ kable(head(kdb)) %>% kable_styling()
 Aliquam erat volutpat. Proin eget arcu et erat viverra eleifend. Quisque suscipit interdum blandit. Cras suscipit, nibh at mattis varius, purus massa pretium est, a malesuada felis velit sed leo. Nam quis malesuada orci. Aliquam consectetur molestie purus in rutrum. Curabitur purus libero, blandit vitae tempus quis, pharetra sit amet ex. Integer ligula lorem, gravida ac dui rutrum, sodales egestas augue. Etiam bibendum risus elit, quis dictum erat tristique id. Sed vulputate, turpis vel commodo molestie, lacus dui varius velit, vitae maximus tellus neque in urna. Donec non purus elementum, condimentum mi eu, semper dolor. Suspendisse malesuada turpis vel libero blandit varius. Cras rhoncus facilisis nunc sed efficitur. Suspendisse suscipit vel dui ut semper. Donec pellentesque tincidunt tincidunt.
 
 ```{r add_cve, echo=FALSE}
+library(xml2)
 
+#' Returns last cve name and amount
+#' 
+#' @param vuln vuln node set 
+#' @return list containing last cve id and amount of cve per vuln
+#' 
+#' @examples lapply(vulns, get_cve_last_count)
+get_cve_last_count = function(vuln) {
+  cve_list <- rvest::html_elements(vuln, xpath = "./CVE_LIST")
+  if (length(cve_list) > 0) {
+    cves <- xml_find_all(cve_list, xpath="./CVE")
+    last_cve_id <- xml_find_one(cves[length(cves)], xpath="./ID")
+    
+    return(list(
+      last_cve=rvest::html_text(last_cve_id),
+      cve_count=length(cves)
+    ))
+  }
+  
+  return(list(NA, 0))
+}
+
+# Execute
+cve_list <- mclapply(
+  xml2::xml_find_all(doc, "//VULN"),
+  FUN=get_cve_last_count,
+  mc.cores=number_of_cores
+)
+
+# Transform list of list into a df
+df.cve = as.data.frame(do.call(rbind, cve_list))
+
+# Unlist df
+df.cve <- as.data.frame(lapply(df.cve, unlist))
 
 ```
 
 ```{r add_cwe, echo=FALSE}
+library(openxlsx)
+library(dplyr)
 
+# Open dataset
+df_cwe <-read.xlsx("../../data/qualys/Global_Dataset.xlsx")
+names(df_cwe)[names(df_cwe) == 'CWE-ID'] <- 'cwe_id'
+names(df_cwe)[names(df_cwe) == 'CVSS-V3'] <- 'cvss_v3'
+names(df_cwe)[names(df_cwe) == 'CVSS-V2'] <- 'cvss_v2'
 
+# Remove multiple cwe per cve ?
+df_cwe <- df_cwe[!duplicated(df_cwe$`CVE-ID`),]
+
+# Extract columns
+df_cwe <- df_cwe[, as.vector(c("CVE-ID", "cwe_id", "cvss_v3", "cvss_v2"))]
+
+# Left Join 
+df.cwe <- left_join(df.cve, df_cwe, by=c('last_cve'='CVE-ID'))
+
+# Normalize CWE No Values
+df.cwe$cwe_id[df.cwe$cwe_id == "NVD-CWE-Other"] <- NA
+df.cwe$cwe_id[df.cwe$cwe_id == "NVD-CWE-noinfo"] <- NA
 ```
 
 ```{r add_cpe, echo=FALSE}
 
 
+```
+
+```{r print_df}
+kdb <- cbind(df.base, df.cve, df.cwe)
+
+kable(head(kdb)) %>% kable_styling()
 ```
 
 ## Conclusion
