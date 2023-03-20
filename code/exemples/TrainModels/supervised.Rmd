@@ -1,0 +1,201 @@
+---
+title: "Supervised Learning"
+author: "Humbert Costas"
+date: "6/2/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library("jsonlite", warn.conflicts = FALSE)
+library("ggplot2", warn.conflicts = FALSE)
+library("lattice", warn.conflicts = FALSE)
+library("caret", warn.conflicts = FALSE)
+library("gbm", warn.conflicts = FALSE)
+library("pROC", warn.conflicts = FALSE)
+library(dplyr)
+
+
+set.seed(42)
+```
+
+# Detección de ataques con aprendizaje supervisado
+
+El siguiente ejercicio consiste en crear un modelo entrenado capaz de detectar ataques a partir de logs de un firewall.
+Para este propósito, se realizará una prueba de concepto con una pequeña muestra de logs previamente etiquetados como tráfico normal o ataque.
+
+## Data sets
+
+Se proporcionan los siguentes archivos:
+
+ - features.csv
+ - events.csv
+
+```{r tidy_data, echo=FALSE}
+events <- read.csv("../../../data/DDSml/raw/events_sample.csv")
+# features <- read.csv("../../../data/DDSml/raw/features.csv")
+```
+
+
+### Events analysis
+Se borran algunos fields que no se consideren relevantes como features para el modelo.
+Se detectaron algunas columnas con NA fields, al ser especificas de un protocolo
+se decidio remover.
+
+```{r events_stats, echo=FALSE}
+# Remove unnecessary data.
+events$attack_cat <- NULL
+events$srcip <- NULL
+events$dstip <- NULL
+events$sport <- NULL
+events$state <- NULL
+
+# Removing columns with na values
+columnsWithNas <- colnames(events)[apply(events, 2, anyNA)]
+events <- events[ , colSums(is.na(events)) == 0]
+
+```
+
+### PCA
+Para el ejemplo practico se intenta aplicar pca.
+El criterio para seleccionar las feature para aplicar PCA va a ser solo que 
+sean númericos. Escalando las variables.
+
+```{r data_enrich, echo=FALSE}
+# Select only numeric features
+df_numeric <- select_if(events, is.numeric)
+
+# Remove labels
+labelsColumn <- df_numeric$Label
+df_numeric$Label <- NULL
+
+pcas <- prcomp(df_numeric, scale=TRUE)
+head(pcas$rotation)
+
+```
+
+## PCA SUMMARY
+Las 38 variables numericas encontradas dentro del DF, pudiendo representar
+casi el 100% de la varianza acumulada con 28 PC.
+Mientras que con 10 componentes principales, podemos representar un 80%.
+
+```{r kable.opts=list(caption='Summary PCAS TABLE')}
+library(kableExtra)
+library(ggfortify)
+
+# Print the summary as a table
+summary_table <- summary(pcas)
+knitr::kable(summary_table$importance, caption = "PCA summary table", digits = 2)  %>% 
+  kable_styling(full_width = F, 
+                bootstrap_options = c("striped", "hover", "condensed"),
+                fixed_thead = T, 
+                # header_position = "top",
+                font_size = 14,
+                latex_options = c("striped", "scale_down"))
+
+autoplot(pcas, data = events, colour = 'Label')
+
+```
+
+## APPLY PCA
+Reemplazamos los valores de PCA en el dataframe
+```{r apply_pca, echo=FALSE}
+df_transformed <- predict(pcas, df_numeric)[, 1:10]
+
+df2 <- events[,!names(df_numeric) %in% c(names(df_numeric))]
+
+shared_cols <- intersect(names(df_numeric), names(events))
+
+events <- events[, !(names(events) %in% shared_cols)]
+events <- cbind(events, df_transformed)
+head(events)
+```
+## Feature engineering
+
+```{r feat_eng, echo=FALSE}
+# El modelo requiere nombres de columna simples y features numericas o factor
+names(events) <- stringr::str_replace_all(names(events), "_", "")
+events <- as.data.frame(unclass(events), stringsAsFactors = TRUE)
+
+# Etiquetamos la columna Label con valores categoricos
+events$Label <- ifelse(events$Label == 1, "ATTACK", "NORMAL")
+events$Label <- as.factor(events$Label)
+
+outcomeName <- 'Label'
+predictorsNames <- names(events)[names(events) != outcomeName]
+
+prop.table(table(events$Label))
+```
+
+## Build model
+
+### Create train and test data sets
+
+```{r train_test, echo=FALSE}
+splitIndex <- createDataPartition(events[,outcomeName], p = .75, list = FALSE, times = 1)
+trainDF <- events[ splitIndex,]
+testDF  <- events[-splitIndex,]
+
+```
+
+### Model definition
+
+```{r model_config, echo=FALSE}
+objControl <- trainControl(method = 'cv', 
+                           number = 3, 
+                           returnResamp = 'none', 
+                           summaryFunction = twoClassSummary, 
+                           classProbs = TRUE)
+```
+
+### Train model
+
+```{r model_train, echo=FALSE}
+objModel <- train(trainDF[,predictorsNames], trainDF[,outcomeName], 
+                  method='gbm', 
+                  trControl=objControl,  
+                  metric = "ROC",
+                  preProc = c("center", "scale"))
+summary(objModel)
+```
+
+### Test model
+
+```{r model_test, echo=FALSE}
+predictions <- predict(object = objModel, testDF[, predictorsNames], type = 'raw')
+head(predictions)
+
+```
+
+## Evaluate model
+
+```{r model_eval, echo=FALSE}
+print(postResample(pred=predictions, obs=as.factor(testDF[,outcomeName])))
+
+```
+
+
+```{r predic_prob}
+# probabilites 
+predictions <- predict(object=objModel, testDF[,predictorsNames], type='prob')
+auc <- roc(ifelse(testDF[,outcomeName]=="ATTACK",1,0), predictions[[2]])
+print(auc$auc)
+```
+
+
+
+```{r var_importance}
+plot(varImp(objModel,scale=F))
+```
+
+
+## Conclusion
+Realizando la reduccion por  pca, y utilizando los 10 primeros pcs y el protocolo.
+Obtendremos,según los test, un Accuracy del 98%.
+
+```{r conclusion, echo=FALSE}
+
+```
+
+
