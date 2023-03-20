@@ -14,6 +14,8 @@ library("lattice", warn.conflicts = FALSE)
 library("caret", warn.conflicts = FALSE)
 library("gbm", warn.conflicts = FALSE)
 library("pROC", warn.conflicts = FALSE)
+library(dplyr)
+
 
 set.seed(42)
 ```
@@ -32,23 +34,83 @@ Se proporcionan los siguentes archivos:
 
 ```{r tidy_data, echo=FALSE}
 events <- read.csv("../../../data/DDSml/raw/events_sample.csv")
-features <- read.csv("../../../data/DDSml/raw/features.csv")
+# features <- read.csv("../../../data/DDSml/raw/features.csv")
 ```
+
 
 ### Events analysis
+Se borran algunos fields que no se consideren relevantes como features para el modelo.
+Se detectaron algunas columnas con NA fields, al ser especificas de un protocolo
+se decidio remover.
 
 ```{r events_stats, echo=FALSE}
+# Remove unnecessary data.
+events$attack_cat <- NULL
+events$srcip <- NULL
+events$dstip <- NULL
+events$sport <- NULL
+events$state <- NULL
 
+# Removing columns with na values
+columnsWithNas <- colnames(events)[apply(events, 2, anyNA)]
+events <- events[ , colSums(is.na(events)) == 0]
 
 ```
 
-### Data enrichment
+### PCA
+Para el ejemplo practico se intenta aplicar pca.
+El criterio para seleccionar las feature para aplicar PCA va a ser solo que 
+sean númericos. Escalando las variables.
 
 ```{r data_enrich, echo=FALSE}
+# Select only numeric features
+df_numeric <- select_if(events, is.numeric)
 
+# Remove labels
+labelsColumn <- df_numeric$Label
+df_numeric$Label <- NULL
+
+pcas <- prcomp(df_numeric, scale=TRUE)
+head(pcas$rotation)
 
 ```
 
+## PCA SUMMARY
+Las 38 variables numericas encontradas dentro del DF, pudiendo representar
+casi el 100% de la varianza acumulada con 28 PC.
+Mientras que con 10 componentes principales, podemos representar un 80%.
+
+```{r kable.opts=list(caption='Summary PCAS TABLE')}
+library(kableExtra)
+library(ggfortify)
+
+# Print the summary as a table
+summary_table <- summary(pcas)
+knitr::kable(summary_table$importance, caption = "PCA summary table", digits = 2)  %>% 
+  kable_styling(full_width = F, 
+                bootstrap_options = c("striped", "hover", "condensed"),
+                fixed_thead = T, 
+                # header_position = "top",
+                font_size = 14,
+                latex_options = c("striped", "scale_down"))
+
+autoplot(pcas, data = events, colour = 'Label')
+
+```
+
+## APPLY PCA
+Reemplazamos los valores de PCA en el dataframe
+```{r apply_pca, echo=FALSE}
+df_transformed <- predict(pcas, df_numeric)[, 1:10]
+
+df2 <- events[,!names(df_numeric) %in% c(names(df_numeric))]
+
+shared_cols <- intersect(names(df_numeric), names(events))
+
+events <- events[, !(names(events) %in% shared_cols)]
+events <- cbind(events, df_transformed)
+head(events)
+```
 ## Feature engineering
 
 ```{r feat_eng, echo=FALSE}
@@ -129,9 +191,10 @@ plot(varImp(objModel,scale=F))
 
 
 ## Conclusion
+Realizando la reduccion por  pca, y utilizando los 10 primeros pcs y el protocolo.
+Obtendremos,según los test, un Accuracy del 98%.
 
 ```{r conclusion, echo=FALSE}
-
 
 ```
 
