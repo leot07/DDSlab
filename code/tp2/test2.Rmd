@@ -27,7 +27,6 @@ in order to successfully complete the assignment
 knitr::opts_chunk$set(echo = TRUE)
 knitr::opts_chunk$set(warning = FALSE)
 set.seed(42)
-setwd("/media/DATA/master/DDSlab/code/tp2")
 # DATASET AMOUNT OF SAMPLES
 sample_amount = 8000
 
