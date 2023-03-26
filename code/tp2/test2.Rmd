@@ -1,0 +1,243 @@
+---
+title: "Test2"
+author: "Torcello Leandro"
+date: "2023-03-25"
+output: html_document
+---
+
+# Intro
+The goal of this project is to improve the classifier model presented in test2.R
+in order to successfully complete the assignment
+
+**Ideas for improvement:**
+
+- Text Mining:
+  - Improve text sanitation
+  - Stem Words
+  - Use N-Grams
+
+- Training Data:
+  - Increase Training Data.
+
+- Model:
+  - Naive Bayes will be replaced with SVM.
+  - Try different SVM kernels.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+set.seed(42)
+setwd("/media/DATA/master/DDSlab/code/tp2")
+# DATASET AMOUNT OF SAMPLES
+sample_amount = 8000
+
+```
+
+```{r load_libs, include=FALSE}
+library(dplyr)
+library(tm)
+library(caret)
+library(RWeka) 
+library(stringr)
+library(SemNetCleaner)
+library(textstem)
+library(e1071) 
+library(ggplot2)
+library(kableExtra)
+
+
+```
+
+
+# Data
+```{r load_data, include=TRUE}
+# Read XML document
+raw.file = "../../data/qualys/latest.qkdb.xml.zip"
+doc <- xml2::read_xml(raw.file)
+```
+
+## DataFrame
+```{r data_extraction, include=FALSE}
+# Extract QID, SEVERITY_LEVEL and DIAGNOSIS
+kdb_txt <- rvest::html_text(rvest::html_elements(doc, xpath="//VULN[DIAGNOSIS]/*[self::QID or self::SEVERITY_LEVEL or self::DIAGNOSIS]"))
+kdb_txt <- matrix(kdb_txt, nrow = length(kdb_txt)/3, ncol = 3, byrow = TRUE)
+kdb_txt <- as.data.frame.matrix(kdb_txt)
+names(kdb_txt) <- c("qid", "severity", "diagnosis")
+df <- data.frame(Samples = nrow(kdb_txt), Columns = ncol(kdb_txt))
+knitr::kable(df, caption ="Dataset Data")
+```
+
+```{r tidy, include=TRUE}
+# Tidy data frame
+kdb_txt$qid <- as.integer(kdb_txt$qid)
+kdb_txt$severity <- as.integer(kdb_txt$severity)
+kdb_txt$diagnosis <- textclean::replace_html(kdb_txt$diagnosis)
+kdb_txt$critical <- ifelse(test = kdb_txt$severity < 5, yes = "NO", no = "YES")
+kdb_txt$criticalb <- kdb_txt$severity == 5
+kdb_txt$descr <- textclean::replace_symbol(kdb_txt$diagnosis)
+knitr::kable(head(kdb_txt, n=2), caption="Dataset Head")
+```
+## Dataset Balance
+```{r include=TRUE, echo=FALSE}
+
+ggplot(kdb_txt, aes(x = critical)) +
+  geom_bar() +
+  labs(x = "Critical", y = "Count", title = "Distribution of Critical Attribute")
+```
+
+# Training
+## Getting training sample
+
+We will select N samples from the original dataset for use in the training set
+```{r training_sample, include=TRUE}
+kdb_critical <- kdb_txt %>% filter(critical == "YES")
+kdb_other <- kdb_txt %>% filter(critical == "NO")
+
+kdb_ml <- bind_rows(kdb_critical %>% sample_n(sample_amount / 2),
+                    kdb_other %>% sample_n(sample_amount / 2)) %>%
+          sample_n(sample_amount) %>%
+          select(descr, critical)
+table(kdb_ml$critical)
+```
+
+## Custom Functions
+Custom functions declaration for text sanitization
+```{r custom_functions, include=TRUE}
+
+#' Returns stems
+#' @params sentence char
+stem_sentence <- function(sentence) {
+  words <- str_split(sentence, " ")[[1]]
+  stem_words <- stem_words(words, language = "english")
+  return(paste(unlist(stem_words), collapse = " "))
+}
+
+#' @params sentence char
+#' @example kdb_ml$descr_sing <- sapply(kdb_ml$descr, singularize_sentence)
+singularize_sentence <- function(sentence) {
+  words <- str_split(sentence, " ")[[1]]
+  singular_words <- lapply(words, singularize)
+  return(paste(unlist(singular_words), collapse = " "))
+}
+
+#' Remove \n from text
+#' @param sentence char
+#' @returns char
+remove_newline <- function(sentence) {
+  sentence <- gsub("\n", " ", sentence)  # Replace newline characters with space
+  return(sentence)
+}
+
+#' Remove extra spaces from text
+#' @param sentence char
+remove_extra_spaces <- function(sentence) {
+  gsub("\\s+", " ", sentence)
+}
+```
+
+## Preparing data
+```{r prepare_data, include=TRUE}
+course_corpus <- VCorpus(VectorSource(kdb_ml$descr))
+# To lowercase
+course_corpus <- tm_map(course_corpus, content_transformer(tolower))
+# Remove punctuation
+course_corpus <- tm_map(course_corpus, removePunctuation)
+# Remove New Lines
+course_corpus <- tm_map(course_corpus, content_transformer(remove_newline))
+# Stop Words
+course_corpus <- tm_map(course_corpus, removeWords, stopwords())
+# Stem Sentence
+course_corpus <- tm_map(course_corpus, content_transformer(stem_sentence))
+# Remove Extra spaces
+course_corpus <- tm_map(course_corpus, content_transformer(remove_extra_spaces))
+```
+
+
+## Generate TF matrix
+```{r TF, include=TRUE}
+# N-Grams
+n_grams_tokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 1, max = 2))
+course_dtm <- DocumentTermMatrix(course_corpus, control=list(tokenize=n_grams_tokenizer))
+
+# Remove terms not in 15% of the documents
+dense_course_dtm <- removeSparseTerms(course_dtm, .85)
+
+# Fix Model Bug. Replace Space with _
+dense_course_dtm$dimnames$Terms = gsub(" ", "_", dense_course_dtm$dimnames$Terms)
+
+# Print updated terms
+Terms(dense_course_dtm)
+```
+
+
+```{r include=FALSE}
+conv_counts <- function(x) {
+  x <- ifelse(x > 0, 1, 0)
+  # Factor has to be removed from X trainging data for svm.
+  # x <- factor(x, levels = c(0, 1), labels = c("No", "Yes"))
+}
+class_dtm <- apply(dense_course_dtm, MARGIN = 2, conv_counts)
+dim(class_dtm)
+```
+
+
+# Model
+## Create Model. SVM
+```{r include=TRUE, warning=FALSE }
+# Load the classifications for the descriptions
+course_classes <- kdb_ml$critical
+# Random split of training and testing sets
+train_set <- createDataPartition(y=course_classes, p=.8,list=FALSE)
+# Splitting the dtm
+train_dtm <- class_dtm[train_set,] 
+test_dtm <- class_dtm[-train_set,]
+# Split the course_classes
+train_classes <- course_classes[train_set]
+test_classes <- course_classes[-train_set]
+#train the model
+course_model_radial <- svm(x = data.frame(train_dtm), y = as.factor(train_classes), type = "C-classification", kernel = "radial", class.weights = c(YES = 1, NO = 1.2))
+course_model_lineal <- svm(x = data.frame(train_dtm), y = as.factor(train_classes), type = "C-classification", kernel = "linear", class.weights = c(YES = 1, NO = 1))
+course_model_poly <- svm(x = data.frame(train_dtm), y = as.factor(train_classes), kernel = 'polynomial', degree = 4)
+```
+
+## Prediction
+```{r include=TRUE}
+# Predict for the test data
+course_predictions_lineal <- predict(course_model_lineal, test_dtm)
+# Analyze prediction accuracy
+conf_mat_lineal <- confusionMatrix(table(course_predictions_lineal, test_classes))
+conf_mat_lineal
+course_predictions_radial <- predict(course_model_radial, test_dtm)
+# Analyze prediction accuracy
+conf_mat_radial <- confusionMatrix(table(course_predictions_radial, test_classes))
+conf_mat_radial
+course_predictions_poly <- predict(course_model_poly, test_dtm)
+# Analyze prediction accuracy
+conf_mat_poly <- confusionMatrix(table(course_predictions_poly, test_classes))
+conf_mat_poly
+```
+
+```{r include=TRUE, echo=FALSE}
+
+# Plot accuracy results
+bar_data <- data.frame(Model = c("Linear", "Radial", "Polynomial"),
+                       Accuracy = c(conf_mat_lineal$overall["Accuracy"], 
+                                    conf_mat_radial$overall["Accuracy"], 
+                                    conf_mat_poly$overall["Accuracy"]))
+
+ggplot(bar_data, aes(x = Model, y = Accuracy, fill = Model)) +
+  geom_bar(stat = "identity", width = 0.5, alpha = 0.8) +
+  labs(title = "Accuracy of SVM Models",
+       x = "Model", y = "Accuracy") +
+  scale_fill_manual(values = c("blue", "red", "green")) +
+  theme_minimal()
+```
+
+## Conclusion
+By using N-Grams and SVM, we were able to increase the accuracy of our model by
+at least 8%, achieving a 75% accuracy rate with both polynomial and radial SVM.
+ However, we had to increase the number of features in our models, which made the
+process more time-consuming. Additionally, SVM is typically more computationally
+expensive than Naive Bayes. 
+Despite these challenges, we were able to achieve a 75% accuracy rate using
+polynomial SVM
